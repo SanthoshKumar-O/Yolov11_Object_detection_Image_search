@@ -1,50 +1,27 @@
-
 import streamlit as st
-import sys
-import tempfile
 import json
-import io
-import base64
 import shutil
 from pathlib import Path
-
 from PIL import Image, ImageDraw, ImageFont
 
 from src.inference import YOLOv11Inference
-from src.utils import (
-    save_metadata,
-    get_unique_classes_counts,
-)
+from src.utils import save_metadata, get_unique_classes_counts
 
 
 # ---------------------------------------------------------
-# Project root
-# ---------------------------------------------------------
-
-sys.path.append(str(Path(__file__).parent))
-
-
-# ---------------------------------------------------------
-# Page configuration
+# PAGE CONFIG
 # ---------------------------------------------------------
 
 st.set_page_config(
     page_title="YOLOv11 Image Search",
-    page_icon="🔍",
-    layout="wide",
+    page_icon="🔎",
+    layout="wide"
 )
 
 
 # ---------------------------------------------------------
-# Helper functions
+# SESSION STATE
 # ---------------------------------------------------------
-
-def img_to_base64(image: Image.Image) -> str:
-    """Convert PIL image to base64 for HTML display."""
-    buffered = io.BytesIO()
-    image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
-
 
 def init_session_state():
 
@@ -56,11 +33,12 @@ def init_session_state():
         "search_params": {
             "search_mode": "Any of selected classes (OR)",
             "selected_classes": [],
-            "thresholds": {},
+            "thresholds": {}
         },
         "show_boxes": True,
         "grid_columns": 3,
         "highlight_matches": True,
+        "upload_dir": None,
     }
 
     for key, value in defaults.items():
@@ -73,7 +51,7 @@ init_session_state()
 
 
 # ---------------------------------------------------------
-# Custom CSS
+# CSS
 # ---------------------------------------------------------
 
 st.markdown(
@@ -83,27 +61,9 @@ st.markdown(
     .image-card {
         border-radius: 10px;
         overflow: hidden;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        box-shadow: 0 2px 10px rgba(0,0,0,0.12);
         margin-bottom: 20px;
         background: #f8f9fa;
-    }
-
-    .image-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(0,0,0,0.18);
-        transition: all 0.2s ease;
-    }
-
-    .image-container {
-        position: relative;
-        width: 100%;
-        aspect-ratio: 4/3;
-    }
-
-    .image-container img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
     }
 
     .meta-overlay {
@@ -111,271 +71,266 @@ st.markdown(
         background: rgba(0,0,0,0.85);
         color: white;
         font-size: 13px;
-        line-height: 1.4;
+        line-height: 1.5;
     }
 
     </style>
     """,
-    unsafe_allow_html=True,
+    unsafe_allow_html=True
 )
 
 
 # ---------------------------------------------------------
-# Title
+# TITLE
 # ---------------------------------------------------------
 
-st.title("🔍 YOLOv11 Computer Vision Search")
+st.title("🔎 YOLOv11 Image Search")
 
 st.write(
     "Upload images, run YOLOv11 object detection, "
-    "then search the images using detected objects and object counts."
+    "and search the images using detected object classes and counts."
 )
 
 
-# =========================================================
-# STEP 1: UPLOAD IMAGES
-# =========================================================
+# ---------------------------------------------------------
+# CREATE SESSION UPLOAD DIRECTORY
+# ---------------------------------------------------------
+
+if st.session_state.upload_dir is None:
+
+    upload_dir = Path("streamlit_uploads")
+
+    upload_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    st.session_state.upload_dir = str(upload_dir)
+
+
+upload_dir = Path(st.session_state.upload_dir)
+
+
+# ---------------------------------------------------------
+# UPLOAD IMAGES
+# ---------------------------------------------------------
 
 st.header("📤 Upload Images")
 
 uploaded_files = st.file_uploader(
     "Choose one or more images",
     type=["jpg", "jpeg", "png", "webp"],
-    accept_multiple_files=True,
+    accept_multiple_files=True
 )
 
 
+# ---------------------------------------------------------
+# PROCESS IMAGES
+# ---------------------------------------------------------
+
 if uploaded_files:
 
-    st.success(f"{len(uploaded_files)} image(s) uploaded.")
-
-    # -----------------------------------------------------
-    # Show uploaded images
-    # -----------------------------------------------------
-
-    with st.expander(
-        f"Preview uploaded images ({len(uploaded_files)})",
-        expanded=False,
-    ):
-
-        preview_cols = st.columns(4)
-
-        for index, uploaded_file in enumerate(uploaded_files):
-
-            with preview_cols[index % 4]:
-
-                image = Image.open(uploaded_file)
-
-                st.image(
-                    image,
-                    caption=uploaded_file.name,
-                    use_container_width=True,
-                )
-
-
-    # -----------------------------------------------------
-    # Model selection
-    # -----------------------------------------------------
-
-    st.subheader("⚙️ Detection Settings")
-
-    model_path = st.text_input(
-        "YOLO model",
-        value="yolo11m.pt",
-        help="Enter the YOLO model filename available in your repository.",
-    )
-
-
-    # -----------------------------------------------------
-    # Run inference
-    # -----------------------------------------------------
+    st.write(f"**{len(uploaded_files)} image(s) selected**")
 
     if st.button(
-        "🚀 Analyze Images",
-        type="primary",
-        use_container_width=True,
+        "🚀 Run YOLOv11 Inference",
+        type="primary"
     ):
 
         try:
+
+            # Clear previous search results
+            st.session_state.search_results = []
+
+            # -------------------------------------------------
+            # Save uploaded files
+            # -------------------------------------------------
+
+            current_upload_dir = upload_dir / "current"
+
+            current_upload_dir.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+            # Remove previous uploaded images
+            for old_file in current_upload_dir.iterdir():
+
+                if old_file.is_file():
+                    old_file.unlink()
+
+                elif old_file.is_dir():
+                    shutil.rmtree(old_file)
+
+
+            image_paths = []
+
+            for uploaded_file in uploaded_files:
+
+                image_path = current_upload_dir / uploaded_file.name
+
+                with open(image_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+                image_paths.append(image_path)
+
+
+            # -------------------------------------------------
+            # YOLO inference
+            # -------------------------------------------------
 
             with st.spinner(
                 "Running YOLOv11 object detection..."
             ):
 
-                # Temporary directory for uploaded images
-                temp_dir = tempfile.mkdtemp(
-                    prefix="yolo_uploads_"
-                )
-
-                temp_path = Path(temp_dir)
-
-
-                # -----------------------------------------
-                # Save uploaded files
-                # -----------------------------------------
-
-                for uploaded_file in uploaded_files:
-
-                    file_path = temp_path / uploaded_file.name
-
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-
-
-                # -----------------------------------------
-                # Load YOLO model
-                # -----------------------------------------
-
                 inferencer = YOLOv11Inference(
-                    model_path
+                    "yolo11m.pt"
                 )
 
+                metadata = []
 
-                # -----------------------------------------
-                # Run existing inference pipeline
-                # -----------------------------------------
+                for image_path in image_paths:
 
-                metadata = inferencer.process_directory(
-                    str(temp_path)
-                )
+                    try:
 
+                        result = inferencer.process_image(
+                            image_path
+                        )
 
-                # -----------------------------------------
-                # Store metadata
-                # -----------------------------------------
+                        metadata.append(result)
 
-                st.session_state.metadata = metadata
+                    except Exception as e:
 
-                (
-                    st.session_state.unique_classes,
-                    st.session_state.count_options,
-                ) = get_unique_classes_counts(
-                    metadata
-                )
+                        st.warning(
+                            f"Could not process "
+                            f"{image_path.name}: {e}"
+                        )
 
 
-                # Reset previous search
-                st.session_state.search_results = []
+            # -------------------------------------------------
+            # Save metadata
+            # -------------------------------------------------
 
-                st.session_state.search_params = {
-                    "search_mode":
-                        "Any of selected classes (OR)",
+            st.session_state.metadata = metadata
 
-                    "selected_classes": [],
+            (
+                st.session_state.unique_classes,
+                st.session_state.count_options
+            ) = get_unique_classes_counts(metadata)
 
-                    "thresholds": {},
-                }
+
+            # Reset search parameters
+            st.session_state.search_params = {
+                "search_mode":
+                    "Any of selected classes (OR)",
+
+                "selected_classes": [],
+
+                "thresholds": {}
+            }
 
 
             st.success(
-                f"✅ Successfully analyzed "
+                f"Successfully processed "
                 f"{len(metadata)} image(s)."
             )
+
 
         except Exception as e:
 
             st.error(
-                f"❌ Error during inference: {str(e)}"
+                f"Error during inference: {e}"
             )
 
 
-# =========================================================
+# ---------------------------------------------------------
 # SEARCH ENGINE
-# =========================================================
+# ---------------------------------------------------------
 
 if st.session_state.metadata:
 
     st.divider()
 
-    st.header("🔎 Search Engine")
-
-    st.caption(
-        "Search your uploaded images using the objects "
-        "detected by YOLOv11."
-    )
+    st.header("🔍 Search Engine")
 
 
     # -----------------------------------------------------
-    # Search mode
+    # SEARCH MODE
     # -----------------------------------------------------
 
-    st.session_state.search_params["search_mode"] = st.radio(
+    search_mode = st.radio(
         "Search mode",
-
-        (
+        [
             "Any of selected classes (OR)",
-            "All selected classes (AND)",
-        ),
-
-        horizontal=True,
+            "All selected classes (AND)"
+        ],
+        horizontal=True
     )
 
+    st.session_state.search_params[
+        "search_mode"
+    ] = search_mode
+
 
     # -----------------------------------------------------
-    # Select classes
+    # CLASS SELECTION
     # -----------------------------------------------------
+
+    selected_classes = st.multiselect(
+        "Classes to search for",
+        options=st.session_state.unique_classes
+    )
 
     st.session_state.search_params[
         "selected_classes"
-    ] = st.multiselect(
-        "Objects to search for",
-
-        options=st.session_state.unique_classes,
-
-        placeholder="Select objects...",
-    )
-
-
-    selected_classes = (
-        st.session_state.search_params[
-            "selected_classes"
-        ]
-    )
+    ] = selected_classes
 
 
     # -----------------------------------------------------
-    # Count thresholds
+    # COUNT THRESHOLDS
     # -----------------------------------------------------
 
     if selected_classes:
 
-        st.subheader("🔢 Object Count Limits")
+        st.subheader("Count Thresholds")
 
-        threshold_cols = st.columns(
+        threshold_columns = st.columns(
             len(selected_classes)
         )
 
         for i, cls in enumerate(selected_classes):
 
-            with threshold_cols[i]:
+            with threshold_columns[i]:
 
-                options = [
-                    "None"
-                ] + st.session_state.count_options[cls]
+                options = (
+                    ["None"]
+                    + st.session_state.count_options[cls]
+                )
+
+                threshold = st.selectbox(
+                    f"Maximum {cls} count",
+                    options=options,
+                    key=f"threshold_{cls}"
+                )
 
                 st.session_state.search_params[
                     "thresholds"
-                ][cls] = st.selectbox(
-                    f"Maximum {cls} count",
-                    options=options,
-                    key=f"threshold_{cls}",
-                )
+                ][cls] = threshold
 
 
     # -----------------------------------------------------
-    # Search
+    # SEARCH BUTTON
     # -----------------------------------------------------
 
     if st.button(
-        "🔍 Search Images",
-        type="primary",
-        use_container_width=True,
+        "🔎 Search Images",
+        type="primary"
     ):
 
         if not selected_classes:
 
             st.warning(
-                "Please select at least one object."
+                "Select at least one class."
             )
 
         else:
@@ -387,25 +342,21 @@ if st.session_state.metadata:
             )
 
 
+            # ---------------------------------------------
+            # SEARCH EACH IMAGE
+            # ---------------------------------------------
+
             for item in st.session_state.metadata:
 
                 class_matches = {}
 
 
-                # -----------------------------------------
-                # Check every selected class
-                # -----------------------------------------
-
                 for cls in selected_classes:
 
-                    class_detections = [
-                        d
-                        for d in item["detections"]
-                        if d["class"] == cls
-                    ]
-
-                    class_count = len(
-                        class_detections
+                    class_count = sum(
+                        1
+                        for detection in item["detections"]
+                        if detection["class"] == cls
                     )
 
 
@@ -432,13 +383,12 @@ if st.session_state.metadata:
 
 
                 # -----------------------------------------
-                # OR search
+                # OR SEARCH
                 # -----------------------------------------
 
                 if (
                     search_params["search_mode"]
-                    ==
-                    "Any of selected classes (OR)"
+                    == "Any of selected classes (OR)"
                 ):
 
                     matches = any(
@@ -447,7 +397,7 @@ if st.session_state.metadata:
 
 
                 # -----------------------------------------
-                # AND search
+                # AND SEARCH
                 # -----------------------------------------
 
                 else:
@@ -465,9 +415,9 @@ if st.session_state.metadata:
             st.session_state.search_results = results
 
 
-# =========================================================
+# ---------------------------------------------------------
 # DISPLAY RESULTS
-# =========================================================
+# ---------------------------------------------------------
 
 if st.session_state.search_results:
 
@@ -477,66 +427,68 @@ if st.session_state.search_results:
         st.session_state.search_params
     )
 
+    selected_classes = (
+        search_params["selected_classes"]
+    )
+
 
     st.divider()
 
     st.subheader(
-        f"📷 {len(results)} Matching Image(s)"
+        f"📷 Results: {len(results)} matching image(s)"
     )
 
 
     # -----------------------------------------------------
-    # Display controls
+    # DISPLAY OPTIONS
     # -----------------------------------------------------
 
     with st.expander(
-        "🎛️ Display Options",
-        expanded=True,
+        "⚙️ Display Options",
+        expanded=True
     ):
 
-        option_cols = st.columns(3)
+        option_columns = st.columns(3)
 
 
-        with option_cols[0]:
+        with option_columns[0]:
 
             st.session_state.show_boxes = st.checkbox(
                 "Show bounding boxes",
-                value=st.session_state.show_boxes,
+                value=st.session_state.show_boxes
             )
 
 
-        with option_cols[1]:
+        with option_columns[1]:
 
             st.session_state.grid_columns = st.slider(
                 "Grid columns",
-                min_value=2,
+                min_value=1,
                 max_value=6,
-                value=st.session_state.grid_columns,
+                value=st.session_state.grid_columns
             )
 
 
-        with option_cols[2]:
+        with option_columns[2]:
 
-            st.session_state.highlight_matches = (
-                st.checkbox(
-                    "Highlight matching classes",
-                    value=st.session_state.highlight_matches,
-                )
+            st.session_state.highlight_matches = st.checkbox(
+                "Highlight matching classes",
+                value=st.session_state.highlight_matches
             )
 
 
     # -----------------------------------------------------
-    # Create image grid
+    # IMAGE GRID
     # -----------------------------------------------------
 
-    grid_cols = st.columns(
+    grid_columns = st.columns(
         st.session_state.grid_columns
     )
 
 
     for index, result in enumerate(results):
 
-        with grid_cols[
+        with grid_columns[
             index % st.session_state.grid_columns
         ]:
 
@@ -547,56 +499,82 @@ if st.session_state.search_results:
                 )
 
 
+                # -----------------------------------------
+                # CHECK IMAGE EXISTS
+                # -----------------------------------------
+
+                if not image_path.exists():
+
+                    st.error(
+                        f"Image not found:\n"
+                        f"{image_path}"
+                    )
+
+                    continue
+
+
+                # -----------------------------------------
+                # OPEN IMAGE
+                # -----------------------------------------
+
                 img = Image.open(
                     image_path
                 ).convert("RGB")
 
 
-                draw = ImageDraw.Draw(img)
-
-
                 # -----------------------------------------
-                # Font
-                # -----------------------------------------
-
-                try:
-
-                    font = ImageFont.truetype(
-                        "arial.ttf",
-                        12,
-                    )
-
-                except:
-
-                    font = ImageFont.load_default()
-
-
-                # -----------------------------------------
-                # Bounding boxes
+                # DRAW BOUNDING BOXES
                 # -----------------------------------------
 
                 if st.session_state.show_boxes:
 
-                    for det in result["detections"]:
-
-                        cls = det["class"]
-
-                        bbox = det["bbox"]
+                    draw = ImageDraw.Draw(img)
 
 
+                    try:
+
+                        font = ImageFont.truetype(
+                            "arial.ttf",
+                            14
+                        )
+
+                    except:
+
+                        font = ImageFont.load_default()
+
+
+                    for detection in result[
+                        "detections"
+                    ]:
+
+                        cls = detection["class"]
+                        bbox = detection["bbox"]
+                        confidence = detection[
+                            "confidence"
+                        ]
+
+
+                        # ---------------------------------
                         # Matching class
+                        # ---------------------------------
+
                         if cls in selected_classes:
 
-                            outline_color = "#30C938"
-                            thickness = 3
+                            outline_width = 3
 
 
+                        # ---------------------------------
                         # Non-matching class
+                        # ---------------------------------
+
                         elif not st.session_state.highlight_matches:
 
-                            outline_color = "#666666"
-                            thickness = 1
+                            outline_width = 1
 
+
+                        # ---------------------------------
+                        # Skip non-matching classes
+                        # ---------------------------------
 
                         else:
 
@@ -605,35 +583,32 @@ if st.session_state.search_results:
 
                         draw.rectangle(
                             bbox,
-                            outline=outline_color,
-                            width=thickness,
+                            outline="green",
+                            width=outline_width
                         )
 
 
                         label = (
                             f"{cls} "
-                            f"{det['confidence']:.2f}"
+                            f"{confidence:.2f}"
                         )
 
 
                         text_bbox = draw.textbbox(
                             (0, 0),
                             label,
-                            font=font,
+                            font=font
                         )
 
 
                         text_width = (
                             text_bbox[2]
-                            -
-                            text_bbox[0]
+                            - text_bbox[0]
                         )
-
 
                         text_height = (
                             text_bbox[3]
-                            -
-                            text_bbox[1]
+                            - text_bbox[1]
                         )
 
 
@@ -646,88 +621,86 @@ if st.session_state.search_results:
                                 + 8,
                                 bbox[1]
                                 + text_height
-                                + 4,
+                                + 4
                             ],
-                            fill=outline_color,
+                            fill="green"
                         )
 
 
                         draw.text(
                             (
                                 bbox[0] + 4,
-                                bbox[1] + 2,
+                                bbox[1] + 2
                             ),
                             label,
                             fill="white",
-                            font=font,
+                            font=font
                         )
 
 
                 # -----------------------------------------
-                # Metadata
+                # DISPLAY IMAGE
                 # -----------------------------------------
 
-                meta_items = [
-
-                    f"{k}: {v}"
-
-                    for k, v
-                    in result["class_counts"].items()
-
-                    if k in selected_classes
-
-                ]
+                st.image(
+                    img,
+                    width="stretch"
+                )
 
 
                 # -----------------------------------------
-                # Image card
+                # METADATA
                 # -----------------------------------------
 
                 st.markdown(
-                    f"""
-                    <div class="image-card">
-
-                        <div class="image-container">
-
-                            <img
-                                src="data:image/png;base64,
-                                {img_to_base64(img)}"
-                            >
-
-                        </div>
-
-                        <div class="meta-overlay">
-
-                            <strong>
-                                {image_path.name}
-                            </strong>
-
-                            <br>
-
-                            {
-                                ", ".join(meta_items)
-                                if meta_items
-                                else "No matches"
-                            }
-
-                        </div>
-
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
+                    f"**{image_path.name}**"
                 )
+
+
+                meta_items = []
+
+                for cls in selected_classes:
+
+                    count = result[
+                        "class_counts"
+                    ].get(cls, 0)
+
+                    if count > 0:
+
+                        meta_items.append(
+                            f"{cls}: {count}"
+                        )
+
+
+                if meta_items:
+
+                    st.caption(
+                        " • ".join(meta_items)
+                    )
+
+                else:
+
+                    st.caption(
+                        "No matching objects"
+                    )
 
 
             except Exception as e:
 
                 st.error(
-                    f"Error displaying image: {str(e)}"
+                    f"Error displaying "
+                    f"{result.get('image_path', 'image')}: "
+                    f"{e}"
                 )
 
 
-    # -----------------------------------------------------
-    # Export results
-    # -----------------------------------------------------
+# ---------------------------------------------------------
+# EXPORT
+# ---------------------------------------------------------
+
+if st.session_state.search_results:
+
+    st.divider()
 
     with st.expander("📦 Export Results"):
 
@@ -735,27 +708,11 @@ if st.session_state.search_results:
             label="Download Results (JSON)",
 
             data=json.dumps(
-                results,
-                indent=2,
+                st.session_state.search_results,
+                indent=2
             ),
 
             file_name="search_results.json",
 
-            mime="application/json",
+            mime="application/json"
         )
-
-
-# =========================================================
-# NO RESULTS
-# =========================================================
-
-elif (
-    st.session_state.metadata
-    and st.session_state.search_params[
-        "selected_classes"
-    ]
-):
-
-    st.info(
-        "No images matched your search criteria."
-    )
